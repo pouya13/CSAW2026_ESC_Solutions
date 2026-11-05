@@ -1,0 +1,76 @@
+\section{Smart Gateway Escape}\label{section:SmartGatewayEscape}
+
+\subsection{The first look}
+The firmware strings showed that the \texttt{escape} command is blocked until a BLE client connects:
+
+\begin{lstlisting}
+{"event":"escape","ok":false,"reason":"UART disabled - connect via BLE first"}
+\end{lstlisting}
+
+A BLE scan showed a device next to the gateway MAC we already knew (\texttt{B8:D6:1A:4C:48:64}):
+
+\begin{lstlisting}
+[NEW] Device B8:D6:1A:4C:48:66 Gateway_Escape_7
+\end{lstlisting}
+
+After connecting, the gateway state changed from \texttt{LOCKED} to \texttt{CONNECTED} and then to \texttt{GUARDED}. The device exposed a vendor-specific service with three characteristics:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+beb5483e-36e1-4688-b7f5-ea07361b26a8
+d0e12345-6789-4abc-def0-123456789abc
+cba1d466-344c-4be3-ab3f-189f80dd7518
+\end{lstlisting}
+
+\subsection{Reading the BLE services}
+We automated the rest of the challenge in one script (\texttt{escape.py}). Reading the first characteristic returned a note from a previous ``prisoner'':
+
+\begin{quote}\itshape
+``\dots they left these BLE services unprotected, but the exit is never left unguarded! \dots I was trying to find a moment where the exit is totally unguarded, but I failed. Analyze the Wi-Fi subcarrier signal variance over time.''
+\end{quote}
+
+The second one returned a Google Drive link to an encrypted log and its AES key:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+{"log_id":70,"drive_url":"https://drive.google.com/...",
+ "aes_key_hex":"9f3cc1aabd7b54b2932b3bf39e6ea8cb05c05a52263ebba51b2b53a57da861ec"}
+\end{lstlisting}
+
+The third characteristic was empty when read, but it turned out to be writable: it sets the device clock.
+
+\subsection{Decrypting the log}
+The file \texttt{log\_070.enc} from the Drive was AES-CBC encrypted, with the IV in the first 16 bytes. Decrypting it with the key gave a CSV with one Wi-Fi measurement every 0.5\,s over a whole day (172{,}800 rows). Each row holds 64 subcarrier amplitudes:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+timestamp_ms,rssi,subcarrier_count,amplitudes
+1767225600000,-50,64,"[15.34,15.72,11.31,15.68,22.86,14.86, ... ,17.52]"
+\end{lstlisting}
+
+\subsection{Finding the unguarded moment}
+The idea behind the hint is Wi-Fi motion detection: when someone moves near the device, the subcarrier amplitudes fluctuate, and when nobody is around they stay flat. For each row we computed the variance of the 64 amplitudes. Most of the day the variance was around 12, but in a few windows it dropped below 1. These quiet windows are the moments when the exit was unguarded:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+2026-01-01 11:48:00 -> 11:49:59  (120s)   epoch 1767268080
+2026-01-01 13:48:00 -> 14:17:59  (1800s)  epoch 1767275280
+2026-01-01 15:08:00 -> 15:09:59  (120s)   epoch 1767280080
+2026-01-01 15:48:00 -> 15:48:29  (30s)    epoch 1767282480
+2026-01-01 16:18:00 -> 16:19:59  (120s)   epoch 1767284280
+2026-01-01 17:18:00 -> 17:19:59  (120s)   epoch 1767287880
+2026-01-01 18:48:00 -> 18:49:59  (120s)   epoch 1767293280
+\end{lstlisting}
+
+The script then wrote the start of each window to the clock characteristic (as a little-endian 64-bit epoch) and checked \texttt{status} over UART. As soon as the state became \texttt{UNGUARDED}, it sent \texttt{escape}:
+
+\begin{lstlisting}[basicstyle=\ttfamily\scriptsize]
+for t in epochs:
+    clock.write(struct.pack("<q", t), withResponse=True)
+    s.write(b"status\r\n")
+    if '"state":"UNGUARDED"' in s.read(99999).decode():
+        s.write(b"escape\r\n")
+        break
+\end{lstlisting}
+
+The flag from the log:
+
+\begin{center}
+\fbox{\texttt{esc\_2026\{Challenge\_7\_WiFi\_MotionDetection\_f9dc4caf\}}}
+\end{center}
